@@ -8,19 +8,24 @@ import org.apache.commons.csv.CSVRecord;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.util.ResourceUtils;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.ConnectableFlux;
 import reactor.core.publisher.Flux;
 
+import java.io.File;
 import java.io.FileReader;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.text.SimpleDateFormat;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
-import java.util.Arrays;
-import java.util.Date;
-import java.util.Locale;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @Configuration
@@ -42,7 +47,7 @@ public class StartConfig {
                         String source = record.get(2).trim();
                         String transfers = record.get(3).trim();
                         String description = record.get(4).trim();
-                        String originCategory = record.get(6).trim();
+                        String originCategory = record.get(6).trim().split(",")[0];
                         String date = record.get(7).trim();
                         String time = record.get(8).trim();
                         String note = record.get(9).trim();
@@ -70,7 +75,9 @@ public class StartConfig {
                             builder.source(csv.getSource())
                                     .destination(csv.getTransfers());
                         }
-                        builder.amount(Math.abs(csv.getAmount()));
+
+                        builder.amount(Math.abs(csv.getAmount()))
+                                .category("");
                         setCommonInfo(csv, builder);
                         return builder.build();
                     });
@@ -82,14 +89,17 @@ public class StartConfig {
                         String originCategory = csv.getCategory();
                         String[] split = originCategory.split(">");
                         if (isTransferToMe) {
+//                            System.out.println("Total: " + Arrays.asList(split));
                             builder.source(split[0].trim())
-                                    .destination(csv.getSource());
+                                    .destination(csv.getSource())
+                                    .category("");
                         } else {
                             builder.source(csv.getSource());
                             if (split.length > 1) {
                                 builder.category(split[0].trim());
                                 builder.destination(split[1].trim());
                             } else {
+                                builder.category("");
                                 builder.destination(split[0].trim());
                             }
                         }
@@ -99,24 +109,55 @@ public class StartConfig {
                     });
 
 
-            Flux<Transaction> transactionFlux = Flux.merge(transferFlux, consumeFlux)
+            Flux<Transaction> transactionFlux = Flux.merge(consumeFlux, transferFlux)
                     .filter(t -> !"借貸".equals(t.getSource()) && !"借貸".equals(t.getDestination()))
                     .filter(t -> (!"股票張戶".equals(t.getSource()) && !"股票張戶".equals(t.getDestination())) && (!"股票".equals(t.getSource()) && !"股票".equals(t.getDestination())));
 
 
 
 
-//            transactionFlux.doOnNext(System.out::println).subscribe();
-
-            transactionFlux.distinct(Transaction::getSource)
-                    .map(Transaction::getSource)
+            transactionFlux
+                    .sort(Comparator.comparing(Transaction::getDate))
+                    .distinct(t -> {
+                        String source = t.getSource();
+                        String destination = t.getDestination();
+                        String date = t.getDate();
+                        Long amount = t.getAmount();
+                        return source + destination + date + amount;
+                    })
+                    .filter(t -> !"".equals(t.getSource()) || !"".equals(t.getDestination()))
+                    .filter(t -> (t.getAmount() == null || t.getAmount() == 0) || (t.getDate() == null || "".equals(t.getDate())))
                     .doOnNext(System.out::println)
-                    .subscribe();
+                    .doOnComplete(() -> System.out.println("complete"))
+                    .subscribe(t -> {
+                        String line = String.format("%s,%s,%s,\"%s\",%s,%s,\"%s\"\n", t.getSource(), t.getCategory(), t.getDestination(), t.getDescription(), t.getDate(), t.getAmount(), t.getNote());
+
+                        try {
+                            Path path = Paths.get("target/transaction.csv");
+                            if (!path.toFile().exists()) {
+                                Files.createFile(path);
+                            }
+//                            Files.writeString(path,line, StandardOpenOption.APPEND);
+                        } catch (IOException e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
+
+//            transactionFlux.distinct(Transaction::getSource)
+//                    .map(Transaction::getSource)
+//                    .doOnNext(System.out::println)
+//                    .subscribe();
+
+//            transactionFlux.distinct(Transaction::getCategory)
+//                    .map(Transaction::getCategory)
+//                    .doOnNext(System.out::println)
+//                    .subscribe();
 
 //            transactionFlux.distinct(Transaction::getDestination)
 //                    .map(Transaction::getDestination)
 //                    .doOnNext(System.out::println)
 //                    .subscribe();
+
             csvConnectableFlux.connect();
         };
     }
@@ -127,8 +168,9 @@ public class StartConfig {
         LocalDate localDate = LocalDate.parse(date, DateTimeFormatter.ofPattern("yyyy/dd/MM"));
         LocalDateTime localDateTime = setTime(localDate, time);
         String dateFormat = localDateTime.format(DateTimeFormatter.ofPattern("yyyyMMdd HH:mm"));
+        String note = record.getNote().replaceAll("\n", " ");
         builder.description(record.getDescription())
-                .note(record.getNote()).date(dateFormat);
+                .note(note).date(dateFormat);
     }
 
     private LocalDateTime setTime(LocalDate localDate, String time) {
